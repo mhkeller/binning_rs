@@ -1,0 +1,35 @@
+{
+  "name": "binner-rs",
+  "version": "1.0.0",
+  "description": "A fast CLI tool for creating histograms from Parquet file data using various statistical binning algorithms",
+  "type": "module",
+  "packageManager": "pnpm@10.11.1",
+  "scripts": {
+    "pretest": "cargo build --release",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
+    "build": "cargo build --release",
+    "dev": "cargo build",
+    "clean": "cargo clean && rm -rf node_modules coverage"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "@vitest/ui": "^1.6.0",
+    "@vitest/coverage-v8": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=10"
+  },
+  "keywords": [
+    "histogram",
+    "binning",
+    "parquet",
+    "data-analysis",
+    "cli",
+    "rust"
+  ],
+  "author": ""
+}
