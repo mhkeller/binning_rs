@@ -56,7 +56,7 @@ pnpm run test:coverage
 
 ### Algorithms
 
-- **jenks**: Natural breaks (Jenks) algorithm for optimal data grouping
+- **jenks**: Natural breaks (Jenks) algorithm for optimal data grouping using ckmeans
 - **quantile**: Quantile-based binning (equal frequency bins)
 - **equal-interval**: Equal-width bins across the data range
 - **standard-deviation**: Bins based on standard deviation from mean
@@ -133,6 +133,7 @@ The tool outputs JSON with the following structure:
 
 - **polars**: Fast DataFrame library for Parquet reading
 - **classify**: Statistical classification algorithms
+- **ckmeans**: Implementation of the Ckmeans.1d.dp algorithm for optimal k-means clustering in 1D
 - **ndhistogram**: N-dimensional histogram with overflow/underflow handling
 - **clap**: Command-line argument parsing
 - **serde**: JSON serialization
@@ -143,6 +144,7 @@ The tool is optimized for large datasets and leverages:
 - Polars lazy evaluation for efficient data loading
 - Rust's memory safety and zero-cost abstractions
 - Efficient histogram algorithms from the classify crate
+- Optimized ckmeans implementation for Jenks natural breaks classification
 
 ## License
 

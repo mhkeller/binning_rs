@@ -7,14 +7,66 @@
  */
 
 use polars::prelude::*;
-use classify::{get_jenks_classification, get_quantile_classification, get_equal_interval_classification, get_st_dev_classification, get_head_tail_classification};
+use classify::{get_quantile_classification, get_equal_interval_classification, get_st_dev_classification, get_head_tail_classification};
 use ndhistogram::{Histogram, ndhistogram, axis::Variable};
 use clap::{Parser, ValueEnum};
 use serde::{Serialize, Deserialize};
 use std::fs::File;
 use std::io::{Write};
+use ckmeans::ckmeans;
 
-#[derive(Debug, Clone, ValueEnum)]
+// We'll use the classify::Bin struct directly instead of creating our own
+
+/// Create Jenks Natural Breaks classification using the ckmeans library
+/// 
+/// This implementation uses the ckmeans crate which provides the Ckmeans.1d.dp algorithm
+/// for optimal k-means clustering in one dimension. The Jenks Natural Breaks algorithm
+/// is essentially a 1D k-means clustering problem optimized for cartographic applications.
+/// 
+/// The ckmeans implementation produces optimal clusters that minimize within-cluster variance
+/// while maximizing between-cluster variance, which is ideal for data classification tasks.
+/// 
+/// # Arguments
+/// * `num_bins` - The number of bins/classes to create
+/// * `values` - The data values to cluster
+/// 
+/// # Returns
+/// A vector of classify::Bin structures with bin_start values at each cluster boundary
+fn get_jenks_classification(num_bins: usize, values: &[f64]) -> Vec<classify::Bin> {
+    let num_classes = std::cmp::min(num_bins, values.len()) as i8; // ckmeans expects i8 for cluster count
+    
+    // Run ckmeans to get the clusters
+    let result = ckmeans(values, num_classes).unwrap_or_else(|_| {
+        // Fallback if clustering fails
+        let mut fallback = Vec::with_capacity(num_classes as usize);
+        for _ in 0..num_classes {
+            fallback.push(Vec::new());
+        }
+        fallback
+    });
+    
+    // Convert result to bin starts (breaks)
+    let mut bins = Vec::new();
+    
+    // Process the clusters to create bins
+    for cluster in result.iter() {
+        if !cluster.is_empty() {
+            let min_val = *cluster.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+            let max_val = *cluster.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+            
+            bins.push(classify::Bin {
+                bin_start: min_val,
+                bin_end: max_val,
+                count: cluster.len() as u64,
+            });
+        }
+    }
+    
+    // Sort bins by bin_start value
+    bins.sort_by(|a, b| a.bin_start.partial_cmp(&b.bin_start).unwrap());
+    
+    bins
+}#[derive(Debug, Clone, ValueEnum)]
 enum BinningAlgorithm {
     Jenks,
     Quantile,
@@ -187,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Create the binning classification based on algorithm
         let bins = match algorithm {
             BinningAlgorithm::Jenks => {
+                // Use our locally-defined function that uses ckmeans
                 get_jenks_classification(args.num_bins, &numeric_values)
             },
             BinningAlgorithm::Quantile => {

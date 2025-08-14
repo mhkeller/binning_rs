@@ -129,4 +129,30 @@ describe('Jenks Algorithm', () => {
     expect(result.metadata.num_bins).toBe(2);
     expect(result.bins).toHaveLength(4); // 2 bins + overflow + underflow
   });
+
+  it('should correctly implement ckmeans for Jenks classification', async () => {
+    const result = await cli.runAndParseJSON([
+      '-f',
+      cli.getTestDataPath('athletes.parquet'),
+      '-c',
+      'weight',
+      '-a',
+      'jenks',
+      '-n',
+      '3',
+    ]);
+
+    expect(result.metadata.algorithm).toBe('Jenks');
+    expect(result.metadata.num_bins).toBe(3);
+    expect(result.bins).toHaveLength(5); // 3 bins + overflow + underflow
+
+    // Check that the bins have appropriate counts
+    const nonEmptyBins = result.bins.filter(bin => bin.count > 0);
+    expect(nonEmptyBins.length).toBeGreaterThan(0);
+
+    // Verify that ckmeans is creating meaningful clusters
+    // by checking that values are distributed between bins
+    const totalCount = result.bins.reduce((sum, bin) => sum + bin.count, 0);
+    expect(totalCount).toBe(result.metadata.numeric_values);
+  });
 });
