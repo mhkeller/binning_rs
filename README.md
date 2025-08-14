@@ -145,7 +145,3 @@ The tool is optimized for large datasets and leverages:
 - Rust's memory safety and zero-cost abstractions
 - Efficient histogram algorithms from the classify crate
 - Optimized ckmeans implementation for Jenks natural breaks classification
-
-## License
-
-This project is open source. See LICENSE file for details.
