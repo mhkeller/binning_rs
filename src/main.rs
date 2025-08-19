@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 /*
  * Binner - A CLI tool for creating histograms from Parquet files
  *
@@ -6,14 +8,19 @@
  * Output is provided as JSON with metadata and bin statistics.
  */
 
-use polars::prelude::*;
-use classify::{get_quantile_classification, get_equal_interval_classification, get_st_dev_classification, get_head_tail_classification};
-use ndhistogram::{Histogram, ndhistogram, axis::Variable};
-use clap::{Parser, ValueEnum};
-use serde::{Serialize, Deserialize};
-use std::fs::File;
-use std::io::{Write};
 use ckmeans::ckmeans;
+use clap::{Parser, ValueEnum};
+use classify::{
+    get_equal_interval_classification, get_head_tail_classification, get_quantile_classification,
+    get_st_dev_classification,
+};
+use float_ord::FloatOrd;
+use itertools::Itertools;
+use ndhistogram::{Histogram, axis::Variable, ndhistogram};
+use polars::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Write;
 
 // We'll use the classify::Bin struct directly instead of creating our own
 
@@ -33,40 +40,29 @@ use ckmeans::ckmeans;
 /// # Returns
 /// A vector of classify::Bin structures with bin_start values at each cluster boundary
 fn get_jenks_classification(num_bins: usize, values: &[f64]) -> Vec<classify::Bin> {
-    let num_classes = std::cmp::min(num_bins, values.len()) as i8; // ckmeans expects i8 for cluster count
+    let num_classes = num_bins.min(values.len()) as i8; // ckmeans expects i8 for cluster count
 
     // Run ckmeans to get the clusters
-    let result = ckmeans(values, num_classes).unwrap_or_else(|_| {
-        // Fallback if clustering fails
-        let mut fallback = Vec::with_capacity(num_classes as usize);
-        for _ in 0..num_classes {
-            fallback.push(Vec::new());
-        }
-        fallback
-    });
+    let result = ckmeans(values, num_classes)
+        .unwrap_or_else(|_| (0..num_classes).map(|_| Vec::new()).collect());
 
-    // Convert result to bin starts (breaks)
-    let mut bins = Vec::new();
-
-    // Process the clusters to create bins
-    for cluster in result.iter() {
-        if !cluster.is_empty() {
-            let min_val = *cluster.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-            let max_val = *cluster.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
-
-            bins.push(classify::Bin {
-                bin_start: min_val,
-                bin_end: max_val,
-                count: cluster.len() as u64,
-            });
-        }
-    }
-
-    // Sort bins by bin_start value
-    bins.sort_by(|a, b| a.bin_start.partial_cmp(&b.bin_start).unwrap());
-
-    bins
-}#[derive(Debug, Clone, ValueEnum)]
+    result
+        .into_iter()
+        .filter(|cluster| !cluster.is_empty())
+        .map(|cluster| {
+            let bin_start = *cluster.iter().min_by_key(|n| FloatOrd(**n)).unwrap();
+            let bin_end = *cluster.iter().max_by_key(|n| FloatOrd(**n)).unwrap();
+            let count = cluster.len() as u64;
+            classify::Bin {
+                bin_start,
+                bin_end,
+                count,
+            }
+        })
+        .sorted_by_key(|bin| FloatOrd(bin.bin_start))
+        .collect()
+}
+#[derive(Debug, Clone, ValueEnum)]
 enum BinningAlgorithm {
     Jenks,
     Quantile,
@@ -120,19 +116,37 @@ struct HistogramResult {
 )]
 struct Args {
     /// Column name to analyze and bin
-    #[arg(short, long, help = "Name of the numeric column to create histogram bins for")]
+    #[arg(
+        short,
+        long,
+        help = "Name of the numeric column to create histogram bins for"
+    )]
     column: Option<String>,
 
     /// Binning algorithm to use for automatic bin calculation
-    #[arg(short, long, value_enum, help = "Algorithm for calculating bin boundaries")]
+    #[arg(
+        short,
+        long,
+        value_enum,
+        help = "Algorithm for calculating bin boundaries"
+    )]
     algorithm: Option<BinningAlgorithm>,
 
     /// Number of bins to create (not used for HeadTail or Quantile algorithms)
-    #[arg(short, long, default_value_t = 5, help = "Target number of bins to create")]
+    #[arg(
+        short,
+        long,
+        default_value_t = 5,
+        help = "Target number of bins to create"
+    )]
     num_bins: usize,
 
     /// Standard deviation multiplier (only for StandardDeviation algorithm)
-    #[arg(long, default_value_t = 1.0, help = "Number of standard deviations for bin sizing")]
+    #[arg(
+        long,
+        default_value_t = 1.0,
+        help = "Number of standard deviations for bin sizing"
+    )]
     std_dev_size: f64,
 
     /// Path to the Parquet file to analyze
@@ -144,7 +158,11 @@ struct Args {
     list_columns: bool,
 
     /// Custom bin edges as comma-separated values (alternative to algorithm-based binning)
-    #[arg(long, value_delimiter = ',', help = "Custom bin boundaries (comma-separated). Use 'null' to include null values bin")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Custom bin boundaries (comma-separated). Use 'null' to include null values bin"
+    )]
     bins: Option<Vec<String>>,
 
     /// Output file path for JSON results (prints to stdout if not specified)
@@ -167,7 +185,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Ensure required arguments are provided when not listing columns
-    let column = args.column.ok_or("Column name is required when not listing columns")?;
+    let column = args
+        .column
+        .ok_or("Column name is required when not listing columns")?;
 
     // Algorithm is only required if custom bins are not provided
     if args.bins.is_none() && args.algorithm.is_none() {
@@ -175,33 +195,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Read data using Polars lazy API
-    let lf = LazyFrame::scan_parquet(&args.file, Default::default())?
-        .select([col(&column)]);
+    let lf = LazyFrame::scan_parquet(&args.file, Default::default())?.select([col(&column)]);
 
     let df = lf.collect()?;
 
     // Extract the column and handle nulls
     let series = df.column(&column)?;
-    let mut numeric_values = Vec::new();
-
-    // Convert to ChunkedArray to iterate over values
-    for i in 0..series.len() {
-        if let Ok(av) = series.get(i) {
-            match av {
-                AnyValue::Float64(f) => numeric_values.push(f),
-                AnyValue::Float32(f) => numeric_values.push(f as f64),
-                AnyValue::Int64(i) => numeric_values.push(i as f64),
-                AnyValue::Int32(i) => numeric_values.push(i as f64),
-                AnyValue::Int16(i) => numeric_values.push(i as f64),
-                AnyValue::Int8(i) => numeric_values.push(i as f64),
-                AnyValue::UInt64(i) => numeric_values.push(i as f64),
-                AnyValue::UInt32(i) => numeric_values.push(i as f64),
-                AnyValue::UInt16(i) => numeric_values.push(i as f64),
-                AnyValue::UInt8(i) => numeric_values.push(i as f64),
-                _ => {}, // Skip nulls and non-numeric types
-            }
-        }
-    }
+    let numeric_values = (0..series.len())
+        .filter_map(|i| series.get(i).ok())
+        .filter_map(|av| match av {
+            AnyValue::Float64(f) => Some(f),
+            AnyValue::Float32(f) => Some(f as f64),
+            AnyValue::Int64(i) => Some(i as f64),
+            AnyValue::Int32(i) => Some(i as f64),
+            AnyValue::Int16(i) => Some(i as f64),
+            AnyValue::Int8(i) => Some(i as f64),
+            AnyValue::UInt64(i) => Some(i as f64),
+            AnyValue::UInt32(i) => Some(i as f64),
+            AnyValue::UInt16(i) => Some(i as f64),
+            AnyValue::UInt8(i) => Some(i as f64),
+            _ => None, // Skip nulls and non-numeric types
+        })
+        .collect::<Vec<_>>();
 
     let null_count = df.height() - numeric_values.len();
 
@@ -213,7 +228,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Use custom bins if provided, otherwise calculate bins using algorithm
     let algorithm_used = args.algorithm.clone();
     let (breaks, include_null_bin) = if let Some(custom_bins) = args.bins {
-
         // Parse bins and check for null
         let mut parsed_breaks = Vec::new();
         let mut has_null_bin = false;
@@ -224,7 +238,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 match bin_str.parse::<f64>() {
                     Ok(value) => parsed_breaks.push(value),
-                    Err(_) => return Err(format!("Invalid bin value: '{}'. Use numeric values or 'null'", bin_str).into()),
+                    Err(_) => {
+                        return Err(format!(
+                            "Invalid bin value: '{}'. Use numeric values or 'null'",
+                            bin_str
+                        )
+                        .into());
+                    }
                 }
             }
         }
@@ -234,26 +254,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         (parsed_breaks, has_null_bin)
     } else {
-        let algorithm = args.algorithm.ok_or("Algorithm is required when custom bins are not provided")?;
+        let algorithm = args
+            .algorithm
+            .ok_or("Algorithm is required when custom bins are not provided")?;
 
         // Create the binning classification based on algorithm
         let bins = match algorithm {
             BinningAlgorithm::Jenks => {
                 // Use our locally-defined function that uses ckmeans
                 get_jenks_classification(args.num_bins, &numeric_values)
-            },
+            }
             BinningAlgorithm::Quantile => {
                 get_quantile_classification(args.num_bins, &numeric_values)
-            },
+            }
             BinningAlgorithm::EqualInterval => {
                 get_equal_interval_classification(args.num_bins, &numeric_values)
-            },
+            }
             BinningAlgorithm::StandardDeviation => {
                 get_st_dev_classification(args.std_dev_size, &numeric_values)
-            },
-            BinningAlgorithm::HeadTail => {
-                get_head_tail_classification(&numeric_values)
             }
+            BinningAlgorithm::HeadTail => get_head_tail_classification(&numeric_values),
         };
 
         // Extract bin edges
@@ -265,7 +285,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Add the final edge to complete the bins
-        if let Some(&max_val) = numeric_values.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
+        if let Some(&max_val) = numeric_values
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+        {
             calculated_breaks.push(max_val + f64::EPSILON); // Add small epsilon to include max value
         }
 
@@ -286,7 +309,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         file: args.file.clone(),
         column: column.clone(),
         algorithm: algorithm_used.as_ref().map(|a| format!("{:?}", a)),
-        num_bins: if algorithm_used.is_some() { Some(args.num_bins) } else { None },
+        num_bins: if algorithm_used.is_some() {
+            Some(args.num_bins)
+        } else {
+            None
+        },
         std_dev_size: if matches!(algorithm_used, Some(BinningAlgorithm::StandardDeviation)) {
             Some(args.std_dev_size)
         } else {
@@ -307,32 +334,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Calculate min/max for this bin by filtering values
         let (min_val, max_val, bin_label, from, to) = match &item.bin {
             ndhistogram::axis::BinInterval::Underflow { end } => {
-                let values_in_bin: Vec<f64> = numeric_values.iter()
+                let values_in_bin: Vec<f64> = numeric_values
+                    .iter()
                     .filter(|&&v| v < *end)
                     .cloned()
                     .collect();
-                let min_val = values_in_bin.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).copied();
-                let max_val = values_in_bin.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).copied();
+                let min_val = values_in_bin
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .copied();
+                let max_val = values_in_bin
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .copied();
                 (min_val, max_val, format!("< {:.3}", end), None, Some(*end))
-            },
+            }
             ndhistogram::axis::BinInterval::Overflow { start } => {
-                let values_in_bin: Vec<f64> = numeric_values.iter()
+                let values_in_bin: Vec<f64> = numeric_values
+                    .iter()
                     .filter(|&&v| v >= *start)
                     .cloned()
                     .collect();
-                let min_val = values_in_bin.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).copied();
-                let max_val = values_in_bin.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).copied();
-                (min_val, max_val, format!(">= {:.3}", start), Some(*start), None)
-            },
+                let min_val = values_in_bin
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .copied();
+                let max_val = values_in_bin
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .copied();
+                (
+                    min_val,
+                    max_val,
+                    format!(">= {:.3}", start),
+                    Some(*start),
+                    None,
+                )
+            }
             ndhistogram::axis::BinInterval::Bin { start, end } => {
-                let values_in_bin: Vec<f64> = numeric_values.iter()
+                let values_in_bin: Vec<f64> = numeric_values
+                    .iter()
                     .filter(|&&v| v >= *start && v < *end)
                     .cloned()
                     .collect();
-                let min_val = values_in_bin.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).copied();
-                let max_val = values_in_bin.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).copied();
-                (min_val, max_val, format!("[{:.3}, {:.3})", start, end), Some(*start), Some(*end))
-            },
+                let min_val = values_in_bin
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .copied();
+                let max_val = values_in_bin
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap())
+                    .copied();
+                (
+                    min_val,
+                    max_val,
+                    format!("[{:.3}, {:.3})", start, end),
+                    Some(*start),
+                    Some(*end),
+                )
+            }
         };
 
         bins.push(NumericHistogramBin {
